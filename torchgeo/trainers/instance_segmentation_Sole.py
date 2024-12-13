@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
 from typing import Any                                           # Allows us to annotate arguments and return types of functions
 import torch.nn as nn                                            # PyTorch module for neural network layers
 import torch                                                     # PyTorch for deep learning operations
