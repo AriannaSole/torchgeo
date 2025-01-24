@@ -1,0 +1,56 @@
+import torch
+import torchgeo
+print('check')
+print(torchgeo.__file__)
+import pytorch_lightning as pl
+from pytorch_lightning import LightningModule
+from torch.utils.data import DataLoader
+from torchgeo.datasets import VHR10
+
+from torchgeo.trainers import InstanceSegmentationTask
+
+
+# Custom collate function for DataLoader (required for Mask R-CNN models)
+def collate_fn(batch):
+    return tuple(zip(*batch))
+
+# Initialize the VHR10 dataset
+train_dataset = VHR10(root="data", split="positive", transforms=None, download=True)
+val_dataset = VHR10(root="data", split="positive", transforms=None)
+
+# Create DataLoaders
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, collate_fn=collate_fn)
+val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, collate_fn=collate_fn)
+
+# Initialize the InstanceSegmentationTask
+task = InstanceSegmentationTask(
+    model="mask_rcnn",         
+    backbone="resnet50",       
+    weights=True,              
+    num_classes=11,            
+    lr=1e-3,                   
+    freeze_backbone=False      
+)
+
+from pytorch_lightning import LightningModule
+print('DEBUGGING')
+print(isinstance(task, LightningModule))  # Should print True
+
+# Set up PyTorch Lightning Trainer
+trainer = pl.Trainer(
+    max_epochs=10,
+    accelerator="gpu" if torch.cuda.is_available() else "cpu",
+    devices=1
+)
+
+# Train the model
+trainer.fit(task, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
+# Evaluate the model
+trainer.test(task, dataloaders=val_loader)
+
+# Example inference
+test_sample = train_dataset[0]
+test_image = test_sample["image"].unsqueeze(0)  # Add batch dimension
+predictions = task.predict_step({"image": test_image}, batch_idx=0)
+print(predictions)

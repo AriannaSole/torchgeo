@@ -48,12 +48,12 @@ class InstanceSegmentationTask(BaseTask):
         """
         self.weights = weights         
         super().__init__()              
-        # self.save_hyperparameters()     
-        # self.model = None               
-        # self.validation_outputs = []    
-        # self.test_outputs = []          
-        # self.configure_models()         
-        # self.configure_metrics()        
+        self.save_hyperparameters()     
+        self.model = None               
+        self.validation_outputs = []    
+        self.test_outputs = []          
+        self.configure_models()         
+        self.configure_metrics()        
 
     def configure_models(self) -> None:
         """Initialize the model.
