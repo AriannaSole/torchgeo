@@ -9,9 +9,9 @@ import torch
 from torch import Tensor                                         
 from torchmetrics.detection.mean_ap import MeanAveragePrecision  
 from torchmetrics import MetricCollection
-from torchvision.models.detection import maskrcnn_resnet50_fpn
+from torchvision.models.detection import maskrcnn_resnet50_fpn, MaskRCNN_ResNet50_FPN_Weights
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from .base import BaseTask  
-
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from ..datasets import RGBBandsMissingError, unbind_samples
@@ -24,7 +24,7 @@ class InstanceSegmentationTask(BaseTask):
         model: str = 'mask_rcnn',           
         backbone: str = 'resnet50',         
         weights: str | bool | None = None, 
-        num_classes: int = 2,               
+        num_classes: int = 2,              
         lr: float = 1e-3,                   
         patience: int = 10,                 
         freeze_backbone: bool = False,      
@@ -66,11 +66,12 @@ class InstanceSegmentationTask(BaseTask):
 
         if model == 'mask_rcnn':
             # Load the Mask R-CNN model with a ResNet50 backbone
-            self.model = maskrcnn_resnet50_fpn(weights=self.weights is True)
+            self.model = maskrcnn_resnet50_fpn(weights=MaskRCNN_ResNet50_FPN_Weights.DEFAULT)  
 
             # Update the classification head to predict `num_classes` 
             in_features = self.model.roi_heads.box_predictor.cls_score.in_features
-            self.model.roi_heads.box_predictor = nn.Linear(in_features, num_classes)
+            # self.model.roi_heads.box_predictor = nn.Linear(in_features, num_classes)
+            self.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
 
             # Update the mask head for instance segmentation
             in_features_mask = self.model.roi_heads.mask_predictor.conv5_mask.in_channels
@@ -111,7 +112,12 @@ class InstanceSegmentationTask(BaseTask):
         """
         images, targets = batch['image'], batch['target']     
         loss_dict = self.model(images, targets)               
-        loss = sum(loss for loss in loss_dict.values())       
+        loss = sum(loss for loss in loss_dict.values())  
+
+        print('\nTRAINING LOSS\n')
+        print(loss_dict, '\n\n')
+        print(loss)
+
         self.log('train_loss', loss, batch_size=len(images))  
         return loss  
 
@@ -125,13 +131,35 @@ class InstanceSegmentationTask(BaseTask):
         Updates metrics and stores predictions/targets for further analysis.
         """
         images, targets = batch['image'], batch['target']   
-        outputs = self.model(images)                  
-        self.metrics.update(outputs, targets)               
-        self.validation_outputs.append((outputs, targets))  
+        batch_size = images.shape[0]
+         
+        outputs = self.model(images) 
+        loss_dict = self.model(images, targets)  # list of dictionaries
+        total_loss = sum(loss_item for loss_dict in loss_dict for loss_item in loss_dict.values() if loss_item.ndim == 0)
 
-        metrics_dict = self.metrics.compute()   
-        self.log_dict(metrics_dict)             
-        self.metrics.reset()    
+        for target in targets:
+            target["masks"] = (target["masks"] > 0).to(torch.uint8)
+            target["boxes"] = target["boxes"].to(torch.float32)
+            target["labels"] = target["labels"].to(torch.int64)
+        
+        # Post-process the outputs to ensure masks are in the correct format
+        for output in outputs:
+            if "masks" in output:
+                output["masks"] = (output["masks"] > 0.5).squeeze(1).to(torch.uint8)
+        
+        # Sum the losses
+        self.log('val_loss', total_loss, batch_size=batch_size)
+
+        metrics = self.val_metrics(outputs, targets)
+        # Log only scalar values from metrics
+        scalar_metrics = {}
+        for key, value in metrics.items():
+            if isinstance(value, torch.Tensor) and value.numel() > 1:
+                # Cast to float if integer and compute mean
+                value = value.to(torch.float32).mean()
+            scalar_metrics[key] = value
+
+        self.log_dict(scalar_metrics, batch_size=batch_size)           
 
         # check
         if (
@@ -161,21 +189,43 @@ class InstanceSegmentationTask(BaseTask):
                     f'image/{batch_idx}', fig, global_step=self.global_step
                 )
                 plt.close()
-
     
     def test_step(self, batch: Any, batch_idx: int) -> None:
         """Compute the test loss and additional metrics."""
 
         images, targets = batch['image'], batch['target']
+        batch_size = images.shape[0]
+
         outputs = self.model(images)
-        self.metrics.update(outputs, targets)
-        self.test_outputs.append((outputs, targets))
+        loss_dict = self.model(images, targets)  # Compute all losses 
+        total_loss = sum(loss_item for loss_dict in loss_dict for loss_item in loss_dict.values() if loss_item.ndim == 0)
 
-        metrics_dict = self.metrics.compute()
-        self.log_dict(metrics_dict)
+        for target in targets:
+            target["masks"] = target["masks"].to(torch.uint8)
+            target["boxes"] = target["boxes"].to(torch.float32)
+            target["labels"] = target["labels"].to(torch.int64)
 
+        for output in outputs:
+            output["masks"] = (output["masks"] > 0.5).squeeze(1).to(torch.uint8)
 
-    def predict_step(self, batch: Any, batch_idx: int) -> Tensor:
+        self.log('test_loss', total_loss, batch_size=batch_size)
+
+        metrics = self.val_metrics(outputs, targets)
+        # Log only scalar values from metrics
+        scalar_metrics = {}
+        for key, value in metrics.items():
+            if isinstance(value, torch.Tensor) and value.numel() > 1:
+                # Cast to float if integer and compute mean
+                value = value.to(torch.float32).mean()
+            scalar_metrics[key] = value
+
+        self.log_dict(scalar_metrics, batch_size=batch_size)
+
+        print('\nTESTING LOSS\n')
+        print(loss_dict, '\n\n')
+        print(total_loss)
+
+    def predict_step(self, batch: Any, batch_idx: int) -> Any:
         """Perform inference on a batch of images.
 
         Args:
@@ -184,9 +234,13 @@ class InstanceSegmentationTask(BaseTask):
         Returns:
             Predicted masks and bounding boxes for the batch.
         """
+        self.model.eval()
         images = batch['image']           
-        y_hat: Tensor = self.model(images) 
-        return y_hat            
+        outputs = self.model(images) 
+
+        for output in outputs:
+            output["masks"] = (output["masks"] > 0.5).to(torch.uint8)
+        return outputs          
 
 
 
